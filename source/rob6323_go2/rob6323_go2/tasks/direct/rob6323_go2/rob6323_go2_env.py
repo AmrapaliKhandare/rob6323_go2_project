@@ -51,6 +51,10 @@ class Rob6323Go2Env(DirectRLEnv):
                 "lin_vel_z", # Update from Part 5.2
                 "dof_vel", # Update from Part 5.2
                 "ang_vel_xy", # Update from Part 5.2
+                "feet_clearance", # Update from Part 6.1
+                "contact_forces", # Update from Part 6.1
+                "rew_torque", # Update for Torque
+
             ]
         }
 
@@ -72,17 +76,26 @@ class Rob6323Go2Env(DirectRLEnv):
         # Update from Part 4.3
         # Get specific body indices
         self._feet_ids = []
+        self._feet_ids_sensor = []
         foot_names = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
         for name in foot_names:
             id_list, _ = self.robot.find_bodies(name)
             self._feet_ids.append(id_list[0])
+
+            # Update from Part 6.2
+            sensor_ids, _ = self._contact_sensor.find_bodies(name)
+            self._feet_ids_sensor.append(sensor_ids[0])
+
+        # Update from Part 6.2
+        self._feet_ids_sensor = torch.tensor(self._feet_ids_sensor, device=self.device, dtype=torch.long)
 
         # Variables needed for the raibert heuristic
         self.gait_indices = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.clock_inputs = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
         self.desired_contact_states = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device, requires_grad=False)
 
-                
+        # Update for torque        
+        self.torques = torch.zeros(self.num_envs, 12, device=self.device)
         # self._feet_ids, _ = self._contact_sensor.find_bodies(".*foot")
         # self._undesired_contact_body_ids, _ = self._contact_sensor.find_bodies(".*thigh")
 
@@ -131,7 +144,7 @@ class Rob6323Go2Env(DirectRLEnv):
 
         # Update from Part 2.3
         # Compute PD torques
-        torques = torch.clip(
+        self.torques = torch.clip(
             (
                 self.Kp * (
                     self.desired_joint_pos 
@@ -144,7 +157,7 @@ class Rob6323Go2Env(DirectRLEnv):
         )
 
         # Apply torques to the robot
-        self.robot.set_joint_effort_target(torques)
+        self.robot.set_joint_effort_target(self.torques)
 
     def _get_observations(self) -> dict:
         self._previous_actions = self._actions.clone()
@@ -300,6 +313,46 @@ class Rob6323Go2Env(DirectRLEnv):
         # 4. Penalize angular velocity in XY plane (rolling and pitching)
         rew_ang_vel_xy = torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=1)
         ######################
+
+        # Update from Part 6.3
+
+        # 1. Foot Clearance Reward
+        # Goal: Feet should be high in the air when in "swing" phase.
+        # Logic: If phase is swing ( > 0.5) AND height is low (< 0.02), penalize.
+
+        # Get foot positions (Z coordinate only)
+        foot_z = self.foot_positions_w[:, :, 2] - 0.02 # Subtract approximate foot radius
+
+        # Get velocity of feet (Z coordinate)
+        foot_vel_z = self.robot.data.body_lin_vel_w[:, self._feet_ids, 2]
+
+        # Identify which feet are currently in swing phase (swing is when clock > 0.5)
+        # Note: self.clock_inputs is sin/cos. We need the raw phase or approximate it.
+        # Easier method: Use the desired contact states we calculated in Part 4.
+        # If desired_contact_state < 0.5, it should be swinging.
+        desired_contact = self.desired_contact_states
+
+        # If it SHOULD be in air (contact=0) but is actually low (foot_z < 0.05), penalize.
+        # We look for "no contact desired" (1 - desired_contact)
+        rew_feet_clearance = torch.sum((1.0 - desired_contact) * torch.square(foot_z - 0.1) * torch.abs(foot_vel_z), dim=1)
+
+
+        # 2. Contact Force Reward (The "Stomp" Reward)
+        # Goal: Feet should push HARD when in "stance" phase.
+        # Logic: If phase is stance, force should be non-zero.
+
+        # CRITICAL: Use the sensor indices we found in __init__
+        contact_forces = self._contact_sensor.data.net_forces_w[:, self._feet_ids_sensor, 2] # Z-force only
+
+        # If we WANT contact (desired=1) but HAVE no force, penalize or reward force.
+        # The tutorial suggests "tracking_contacts_shaped_force".
+        # Standard formula: Force should roughly match gravity / 4 feet when standing.
+        rew_contact_forces = torch.sum(desired_contact * contact_forces, dim=1)
+
+        ###########################
+
+        # Update for Torque
+        rew_torque = torch.sum(torch.square(self.torques), dim=1)
         
         # Update the prev action hist (roll buffer and insert new action)
         self.last_actions = torch.roll(self.last_actions, 1, 2)
@@ -314,7 +367,10 @@ class Rob6323Go2Env(DirectRLEnv):
             "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale, # Update from Part 5.2
             "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale, # Update from Part 5.2
             "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale, # Update from Part 5.2
-        }
+            "feet_clearance": rew_feet_clearance * self.cfg.feet_clearance_reward_scale, # Update from Part 6.2
+            "contact_forces": rew_contact_forces * self.cfg.tracking_contacts_shaped_force_reward_scale, # Update from Part 6.2
+            "rew_torque": rew_torque * self.cfg.torque_reward_scale, # Update for Torque
+            }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
         for key, value in rewards.items():
