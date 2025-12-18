@@ -46,7 +46,11 @@ class Rob6323Go2Env(DirectRLEnv):
                 "track_lin_vel_xy_exp",
                 "track_ang_vel_z_exp",
                 "rew_action_rate",     # Update from Part 1.2
-                "raibert_heuristic"    # Update from Part 1.2
+                "raibert_heuristic",    # Update from Part 1.2
+                "orient", # Update from Part 5.2
+                "lin_vel_z", # Update from Part 5.2
+                "dof_vel", # Update from Part 5.2
+                "ang_vel_xy", # Update from Part 5.2
             ]
         }
 
@@ -281,6 +285,22 @@ class Rob6323Go2Env(DirectRLEnv):
         # Second derivative (Current - 2*Last + 2ndLast)
         rew_action_rate += torch.sum(torch.square(self._actions - 2 * self.last_actions[:, :, 0] + self.last_actions[:, :, 1]), dim=1) * (self.cfg.action_scale ** 2)
 
+        # Update from Part 5.2
+        # 1. Penalize non-vertical orientation (projected gravity on XY plane)
+        # If the robot is flat, gravity is [0,0,-1]. Any X or Y component means tilting.
+        rew_orient = torch.sum(torch.square(self.robot.data.projected_gravity_b[:, :2]), dim=1)
+
+        # 2. Penalize vertical velocity (bouncing/hopping)
+        # We only care about Z component (index 2)
+        rew_lin_vel_z = torch.square(self.robot.data.root_lin_vel_b[:, 2])
+
+        # 3. Penalize high joint velocities (jitter/noise)
+        rew_dof_vel = torch.sum(torch.square(self.robot.data.joint_vel), dim=1)
+
+        # 4. Penalize angular velocity in XY plane (rolling and pitching)
+        rew_ang_vel_xy = torch.sum(torch.square(self.robot.data.root_ang_vel_b[:, :2]), dim=1)
+        ######################
+        
         # Update the prev action hist (roll buffer and insert new action)
         self.last_actions = torch.roll(self.last_actions, 1, 2)
         self.last_actions[:, :, 0] = self._actions[:]
@@ -290,6 +310,10 @@ class Rob6323Go2Env(DirectRLEnv):
             "track_ang_vel_z_exp": yaw_rate_error_mapped * self.cfg.yaw_rate_reward_scale,
             "rew_action_rate": rew_action_rate * self.cfg.action_rate_reward_scale, # Update from Part 1.4
             "raibert_heuristic": rew_raibert_heuristic * self.cfg.raibert_heuristic_reward_scale, # Update from Part 4.6
+            "orient": rew_orient * self.cfg.orient_reward_scale, # Update from Part 5.2
+            "lin_vel_z": rew_lin_vel_z * self.cfg.lin_vel_z_reward_scale, # Update from Part 5.2
+            "dof_vel": rew_dof_vel * self.cfg.dof_vel_reward_scale, # Update from Part 5.2
+            "ang_vel_xy": rew_ang_vel_xy * self.cfg.ang_vel_xy_reward_scale, # Update from Part 5.2
         }
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
         # Logging
