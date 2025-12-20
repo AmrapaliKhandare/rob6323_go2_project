@@ -165,3 +165,80 @@ The suggested way to inspect these logs is via the Open OnDemand web interface:
 
 ---
 Students should only edit README.md below this line.
+
+## Project Summary
+
+This repository contains solution for **Project 2: Reinforcement Learning** in *Reinforcement Learning and Optimal Control for Autonomous Systems I*.  
+We train a PPO-based locomotion policy for the **Unitree Go2** quadruped in **Isaac Lab**, starting from a weak velocity-tracking baseline and progressively improving gait quality, stability, smoothness, and command tracking.
+
+---
+
+## 1. Tutorial Reproduction (Baseline)
+
+We **first reproduced the official Isaac Lab Go2 tutorial (Parts 1–4)** exactly as provided in the course project instructions.  
+This verified baseline exhibited the expected unstable, hopping-dominated behavior and served as the foundation for all subsequent improvements.
+
+All modifications described below were introduced **incrementally on top of this reproduced tutorial baseline**.
+
+---
+
+## 2. Key Modifications and Design Choices
+
+### 2.1 Action Smoothness and Regularization
+- Added **action rate penalty** using first- and second-order differences of actions
+- Maintained a short **action history buffer (length = 3)**
+- Added **torque magnitude regularization** with a small scale (`-0.0001`) to ensure smooth and physically plausible motion
+
+### 2.2 Custom Low-Level Control
+- Disabled Isaac Lab’s implicit PD controller
+- Implemented an **explicit torque-level PD controller**
+  - Gains: `Kp = 20.0`, `Kd = 0.5`
+  - Torque limits: ±100 Nm
+
+### 2.3 Early Termination
+- Added early termination if base height falls below **0.20 m**
+- Prevents learning degenerate crawling or body-dragging behaviors
+
+### 2.4 Gait Shaping via Raibert Heuristic
+- Implemented **Raibert heuristic–based foot placement reward**
+- Added **clock inputs (sin/cos gait phase)** to the observation space
+- Enforced **0.5-cycle diagonal phase offsets** to induce a stable trotting gait
+
+### 2.5 Stability and Foot Interaction
+- Penalized:
+  - Non-flat torso orientation
+  - Vertical base velocity
+  - Excessive joint velocities
+  - Roll/pitch angular velocity
+- Increased **foot clearance penalty** to prevent tripping and hopping
+- Tracked contact-related rewards for gait consistency
+
+---
+
+## 3. Training Configuration
+
+- Simulator: **Isaac Lab**
+- Algorithm: **PPO**
+- Robot: **Unitree Go2**
+- Task: Flat terrain locomotion
+- Commanded velocities: `(v_x, v_y, \dot{\psi})`
+
+---
+
+## 4. Reproducibility
+
+### 4.1 Training Command
+
+To reproduce the final policy used in the report:
+
+```bash
+cd "$HOME/rob6323_go2_project"
+./train.sh
+```
+## 5. Demo Video
+
+A 30-second demonstration video showing stable trotting and command following
+in Isaac Lab is included with the submission.
+
+
+
